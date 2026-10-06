@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Портфель акций</title>
+  <meta name="description" content="Учёт сделок и стоимости портфеля акций. Котировки MOEX ISS, данные хранятся в браузере.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%232a78d6' stroke-width='6'/%3E%3Cpath d='M16 5a11 11 0 0 1 11 11' fill='none' stroke='%23eb6834' stroke-width='6'/%3E%3C/svg%3E">
+  <script>
+    // Тема применяется до отрисовки, чтобы не мигала.
+    try {
+      var t = localStorage.getItem('portfolio-tracker:theme');
+      if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Портфель</h1>
+      <span class="brand-sub">учёт сделок</span>
+    </div>
+    <div class="toolbar">
+      <button type="button" class="btn primary" id="add-trade-btn">+ Сделка</button>
+      <button type="button" class="btn" id="refresh-btn">Обновить цены</button>
+      <details class="menu" id="export-menu">
+        <summary class="btn">Экспорт CSV</summary>
+        <div class="menu-list" role="menu">
+          <button type="button" role="menuitem" data-export="trades">Сделки</button>
+          <button type="button" role="menuitem" data-export="positions">Позиции</button>
+          <button type="button" role="menuitem" data-export="history">История стоимости</button>
+          <button type="button" role="menuitem" data-export="income">Дивиденды и купоны</button>
+        </div>
+      </details>
+      <button type="button" class="btn" id="import-btn" title="Сделки из CSV-отчёта брокера или из экспорта этого сайта">Импорт сделок</button>
+      <input type="file" id="import-file" accept=".csv,text/csv,text/plain" hidden>
+      <button type="button" class="btn icon" id="theme-btn" aria-label="Тема оформления" title="Тема оформления"></button>
+    </div>
+  </header>
+
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+
+  <main>
+    <section class="kpis" id="kpis" aria-label="Итоги портфеля"></section>
+    <div class="warning" id="price-warning" hidden></div>
+
+    <section class="charts">
+      <article class="card" id="alloc-card">
+        <h2>Доли бумаг</h2>
+        <div class="alloc">
+          <div class="chart-box donut-box" id="donut"></div>
+          <ul class="legend" id="donut-legend"></ul>
+        </div>
+      </article>
+
+      <article class="card" id="history-card">
+        <div class="card-head">
+          <div>
+            <h2>Стоимость портфеля</h2>
+            <p class="card-sub" id="history-sub"></p>
+          </div>
+          <div class="seg" role="group" aria-label="Период" id="range">
+            <button type="button" data-range="1">1М</button>
+            <button type="button" data-range="3">3М</button>
+            <button type="button" data-range="6">6М</button>
+            <button type="button" data-range="12">1Г</button>
+            <button type="button" data-range="all">Всё</button>
+          </div>
+        </div>
+        <ul class="legend inline" id="history-legend">
+          <li><span class="key line s-value"></span>Стоимость</li>
+          <li><span class="key line s-invested"></span>Чистые вложения</li>
+        </ul>
+        <div class="chart-box" id="history-chart"></div>
+        <p class="note" id="history-note"></p>
+        <details class="table-details" id="history-table-details">
+          <summary>Таблица значений</summary>
+          <div class="table-wrap"><table class="data" id="history-table"></table></div>
+        </details>
+      </article>
+    </section>
+
+    <section class="card" id="bench-card">
+      <div class="card-head">
+        <div>
+          <h2>Доходность и индекс МосБиржи</h2>
+          <p class="card-sub" id="bench-sub"></p>
+        </div>
+        <div class="seg" role="group" aria-label="Период" id="bench-range">
+          <button type="button" data-range="1">1М</button>
+          <button type="button" data-range="3">3М</button>
+          <button type="button" data-range="6">6М</button>
+          <button type="button" data-range="12">1Г</button>
+          <button type="button" data-range="all">Всё</button>
+        </div>
+      </div>
+      <div class="bench-tools" id="bench-tools">
+        <ul class="legend inline">
+          <li><span class="key line s-value"></span>Портфель</li>
+          <li><span class="key line s-bench"></span>Индекс IMOEX</li>
+        </ul>
+        <label class="check"><input type="checkbox" id="bench-income"> Учитывать дивиденды и купоны</label>
+      </div>
+      <div class="chart-box" id="bench-chart"></div>
+      <p class="note" id="bench-note"></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Позиции</h2>
+        <label class="check"><input type="checkbox" id="show-closed"> Показать закрытые</label>
+      </div>
+      <div class="table-wrap"><table class="data positions" id="positions"></table></div>
+    </section>
+
+    <section class="card" id="income-card">
+      <div class="card-head">
+        <div>
+          <h2>Дивиденды и купоны</h2>
+          <p class="card-sub" id="income-sub"></p>
+        </div>
+        <div class="card-tools">
+          <label class="select-label">Налог
+            <select id="tax-rate">
+              <option value="0.13">13 %</option>
+              <option value="0.15">15 %</option>
+              <option value="0">не учитывать</option>
+            </select>
+          </label>
+          <button type="button" class="btn small" id="add-income-btn">+ Выплата вручную</button>
+        </div>
+      </div>
+      <div class="seg" role="group" aria-label="Что показать" id="income-tabs">
+        <button type="button" data-tab="upcoming">Календарь выплат</button>
+        <button type="button" data-tab="received">Получено</button>
+      </div>
+      <div class="table-wrap income-wrap"><table class="data income" id="income-table"></table></div>
+      <p class="note" id="income-note"></p>
+    </section>
+
+    <section class="card" id="trade-card">
+      <h2 id="trade-form-title">Новая сделка</h2>
+      <form id="trade-form" novalidate autocomplete="off">
+        <div class="form-grid">
+          <label class="field">
+            <span>Тикер</span>
+            <input name="ticker" id="f-ticker" list="ticker-list" placeholder="SBER" maxlength="20" autocapitalize="characters" spellcheck="false" required>
+            <small class="field-error" data-for="ticker"></small>
+          </label>
+          <label class="field">
+            <span>Дата</span>
+            <input name="date" id="f-date" type="date" required>
+            <small class="field-error" data-for="date"></small>
+          </label>
+          <fieldset class="field side">
+            <legend>Операция</legend>
+            <div class="seg wide">
+              <label><input type="radio" name="side" value="buy" checked><span>Покупка</span></label>
+              <label><input type="radio" name="side" value="sell"><span>Продажа</span></label>
+            </div>
+            <small class="field-error" data-for="side"></small>
+          </fieldset>
+          <label class="field">
+            <span>Количество, шт.</span>
+            <input name="qty" id="f-qty" inputmode="numeric" placeholder="10" required>
+            <small class="field-error" data-for="qty"></small>
+          </label>
+          <label class="field">
+            <span>Цена за шт., ₽</span>
+            <input name="price" id="f-price" inputmode="decimal" placeholder="280,50" required>
+            <small class="field-error" data-for="price"></small>
+          </label>
+          <label class="field">
+            <span>Комиссия, ₽ или %</span>
+            <input name="fee" id="f-fee" inputmode="decimal" placeholder="0 или 0,05%">
+            <small class="field-error" data-for="fee"></small>
+          </label>
+        </div>
+        <datalist id="ticker-list"></datalist>
+        <p class="form-summary" id="form-summary"></p>
+        <p class="form-error" id="form-error" role="alert"></p>
+        <div class="form-actions">
+          <button type="submit" class="btn primary" id="submit-btn">Добавить сделку</button>
+          <button type="button" class="btn" id="cancel-edit-btn" hidden>Отменить</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Сделки</h2>
+        <label class="select-label">Бумага
+          <select id="trade-filter"><option value="">все</option></select>
+        </label>
+      </div>
+      <div class="table-wrap"><table class="data" id="trades"></table></div>
+    </section>
+
+    <section class="card method">
+      <details>
+        <summary>Как считается</summary>
+        <ul>
+          <li><b>Средняя цена</b> — себестоимость позиции (покупки плюс комиссии), делённая на количество. При продаже себестоимость списывается по средней цене.</li>
+          <li><b>Нереализованная прибыль/убыток</b> — текущая стоимость позиции минус её себестоимость; процент — к себестоимости.</li>
+          <li><b>Реализованная</b> — выручка от продаж минус комиссии минус списанная себестоимость.</li>
+          <li><b>Итого</b> — текущая стоимость + выручка от продаж − все затраты на покупки (с комиссиями); процент — к сумме всех покупок.</li>
+          <li><b>Чистые вложения</b> на графике — сколько денег вложено на дату: покупки с комиссиями минус выручка от продаж. Разрыв между линиями — прибыль или убыток на эту дату.</li>
+          <li><b>Цены.</b> Текущие котировки и дневные цены закрытия — MOEX ISS (фондовый рынок, акции и фонды), с задержкой до 15 минут. Если котировки нет, используется цена, введённая вручную, затем последняя сохранённая котировка, затем цена последней сделки — источник подписан у каждой цены.</li>
+          <li><b>Дивиденды и купоны</b> — из MOEX ISS. Выплата начисляется на бумаги, которые были в портфеле на дату закрытия реестра с учётом расчётов Т+1: сделка должна быть заключена не позже рабочего дня перед этой датой (до 31.07.2023 — Т+2 для акций и Т+0 для облигаций). Праздничные дни биржи не учитываются. Дата выплаты дивиденда биржей не публикуется — она оценена как 10 рабочих дней после даты реестра. Налог — выбранная ставка от суммы. Если брокер зачислил другую сумму, отметьте выплату «Не учитывать» и добавьте фактическую вручную.</li>
+          <li><b>Итог с выплатами</b> — прибыль/убыток всего плюс полученные дивиденды и купоны после налога. Налог с прибыли от продаж не учитывается. Накопленный купонный доход (НКД), уплаченный при покупке облигации, отдельно не учитывается.</li>
+          <li><b>Доходность портфеля</b> на графике сравнения — взвешенная по времени: покупки и продажи не считаются доходом или убытком, учитывается только изменение цен (и выплаты, если включить). Покупки считаются сделанными в начале дня. <b>IMOEX</b> — ценовой индекс Московской биржи, без дивидендов. Обе линии начинаются с 0 % в начале выбранного периода.</li>
+        </ul>
+      </details>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>Данные хранятся только в этом браузере. Сайт ведёт учёт и не даёт инвестиционных рекомендаций.</p>
+    <button type="button" class="btn danger-link" id="clear-btn">Удалить все данные</button>
+  </footer>
+
+  <dialog id="price-dialog" aria-labelledby="pd-title">
+    <form method="dialog" id="price-form" novalidate>
+      <h3 id="pd-title">Цена</h3>
+      <p class="dialog-info" id="pd-info"></p>
+      <label class="field">
+        <span>Цена за шт., ₽</span>
+        <input id="pd-input" inputmode="decimal" autocomplete="off">
+        <small class="field-error" id="pd-error"></small>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="pd-reset">Брать с MOEX</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="pd-cancel">Отмена</button>
+        <button type="submit" class="btn primary" id="pd-save">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="income-dialog" aria-labelledby="inc-title">
+    <form method="dialog" id="income-form" novalidate autocomplete="off">
+      <h3 id="inc-title">Выплата вручную</h3>
+      <p class="dialog-info">Сумма, которую брокер фактически зачислил на счёт (после налога). Например, для бумаг, которых нет на MOEX.</p>
+      <div class="form-grid dialog-grid">
+        <label class="field">
+          <span>Тикер</span>
+          <input name="ticker" list="ticker-list" placeholder="SBER" maxlength="20" autocapitalize="characters" spellcheck="false">
+          <small class="field-error" data-for="ticker"></small>
+        </label>
+        <label class="field">
+          <span>Дата зачисления</span>
+          <input name="date" type="date">
+          <small class="field-error" data-for="date"></small>
+        </label>
+        <fieldset class="field side">
+          <legend>Вид</legend>
+          <div class="seg wide">
+            <label><input type="radio" name="kind" value="dividend" checked><span>Дивиденд</span></label>
+            <label><input type="radio" name="kind" value="coupon"><span>Купон</span></label>
+          </div>
+          <small class="field-error" data-for="kind"></small>
+        </fieldset>
+        <label class="field">
+          <span>Сумма, ₽</span>
+          <input name="amount" inputmode="decimal" placeholder="1 234,56">
+          <small class="field-error" data-for="amount"></small>
+        </label>
+        <label class="field wide-field">
+          <span>Комментарий (необязательно)</span>
+          <input name="note" maxlength="100">
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="inc-cancel">Отмена</button>
+        <button type="submit" class="btn primary">Добавить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="map-dialog" class="wide" aria-labelledby="map-title">
+    <form method="dialog" id="map-form" novalidate>
+      <h3 id="map-title">Импорт сделок</h3>
+      <div id="map-body"></div>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="map-cancel">Отмена</button>
+        <button type="submit" class="btn primary" id="map-submit">Импортировать</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="import-dialog" aria-labelledby="imp-title">
+    <form method="dialog">
+      <h3 id="imp-title">Импорт сделок</h3>
+      <div class="dialog-info" id="imp-info"></div>
+      <div class="dialog-actions" id="imp-actions"></div>
+    </form>
+  </dialog>
+
+  <script src="js/format.js"></script>
+  <script src="js/portfolio.js"></script>
+  <script src="js/csv.js"></script>
+  <script src="js/income.js"></script>
+  <script src="js/moex.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

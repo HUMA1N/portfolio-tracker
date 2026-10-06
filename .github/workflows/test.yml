@@ -1,0 +1,23 @@
+# Тесты расчётов: портфель, дивиденды и купоны, доходность и сравнение с IMOEX,
+# импорт CSV, разбор ответов MOEX ISS (сеть подменяется, интернет не нужен).
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Проверка синтаксиса скриптов сайта
+        run: for f in js/*.js; do node --check "$f"; done
+      - name: Тесты
+        run: npm test
