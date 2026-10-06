@@ -121,3 +121,58 @@ test('isRub', () => {
   assert.ok(Moex.isRub(null));
   assert.ok(!Moex.isRub('USD'));
 });
+
+test('fetchDividends: даты реестра и размер на акцию', async () => {
+  const calls = mockFetch([
+    [
+      /\/securities\/SBER\/dividends\.json$/,
+      {
+        dividends: block(
+          ['secid', 'isin', 'registryclosedate', 'value', 'currencyid'],
+          [
+            ['SBER', 'RU0009029540', '2025-07-18', 34.84, 'SUR'],
+            ['SBER', 'RU0009029540', '2024-07-11', 33.3, 'SUR'],
+            ['SBER', 'RU0009029540', null, 1, 'SUR'],
+          ]
+        ),
+      },
+    ],
+  ]);
+  const d = await Moex.fetchDividends('SBER');
+  assert.equal(calls[0].searchParams.get('iss.only'), 'dividends');
+  assert.deepEqual(d, [
+    { recordDate: '2024-07-11', value: 33.3, currency: 'SUR' },
+    { recordDate: '2025-07-18', value: 34.84, currency: 'SUR' },
+  ]);
+});
+
+test('fetchCoupons: рубли, неизвестный размер и листание', async () => {
+  const cols = ['isin', 'name', 'coupondate', 'recorddate', 'startdate', 'facevalue', 'faceunit', 'value', 'valueprc', 'value_rub'];
+  const all = [];
+  for (let i = 0; i < 130; i++) {
+    const d = new Date(Date.UTC(2020, 0, 1 + i * 30)).toISOString().slice(0, 10);
+    all.push(['RU000A', 'x', d, null, null, 1000, 'SUR', i < 129 ? 40 : null, 8, i < 129 ? 40 : null]);
+  }
+  const calls = mockFetch([
+    [
+      /\/bondization\/RU000A\.json$/,
+      (u) => {
+        const start = Number(u.searchParams.get('start'));
+        const limit = Number(u.searchParams.get('limit'));
+        return { coupons: block(cols, all.slice(start, start + limit)) };
+      },
+    ],
+  ]);
+  const c = await Moex.fetchCoupons('RU000A');
+  assert.equal(calls.length, 2);
+  assert.equal(c.length, 130);
+  assert.deepEqual(c[0], { payDate: '2020-01-01', recordDate: null, value: 40, currency: 'SUR' });
+  assert.equal(c[129].value, null);
+});
+
+test('fetchIndexCloses берёт IMOEX с рынка индексов', async () => {
+  const calls = mockFetch([[/\/candles\.json$/, { candles: block(['close', 'begin'], [[3000.5, '2025-01-06 00:00:00']]) }]]);
+  const v = await Moex.fetchIndexCloses('2025-01-01', '2025-01-06');
+  assert.deepEqual(v, [['2025-01-06', 3000.5]]);
+  assert.equal(calls[0].pathname, '/iss/engines/stock/markets/index/boards/SNDX/securities/IMOEX/candles.json');
+});

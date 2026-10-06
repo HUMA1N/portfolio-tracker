@@ -212,7 +212,8 @@
    * closes: Map тикер → [[ISO-дата, цена закрытия], ...] (по возрастанию дат).
    * current: Map тикер → текущая цена (подставляется на сегодняшний день).
    * Цена на день — последняя известная на эту дату: закрытие торгов,
-   * а если его нет — цена сделки. Возвращает { points, approximated: Set тикеров без истории }.
+   * а если его нет — цена сделки. Возвращает { points, approximated: Set тикеров без истории };
+   * в точке: value — стоимость, invested — чистые вложения, inflow/outflow — покупки и продажи за день.
    */
   function buildHistory(trades, closes, today, current) {
     const sorted = sortTrades(trades);
@@ -244,15 +245,19 @@
 
     for (let n = start; n <= end; n++) {
       const d = Fmt.isoFromDayNumber(n);
+      let inflow = 0;
+      let outflow = 0;
       while (ti < sorted.length && sorted[ti].date === d) {
         const t = sorted[ti++];
         const gross = t.qty * t.price;
         if (t.side === 'buy') {
           held.set(t.ticker, (held.get(t.ticker) || 0) + t.qty);
           invested += gross + t.fee;
+          inflow += gross + t.fee;
         } else {
           held.set(t.ticker, (held.get(t.ticker) || 0) - t.qty);
           invested -= gross - t.fee;
+          outflow += gross - t.fee;
         }
       }
       let value = 0;
@@ -261,9 +266,77 @@
         while (s.i + 1 < s.pts.length && s.pts[s.i + 1][0] <= d) s.i++;
         if (q > EPS && s.i >= 0) value += q * s.pts[s.i][1];
       }
-      points.push({ date: d, value, invested });
+      points.push({ date: d, value, invested, inflow, outflow });
     }
     return { points, approximated };
+  }
+
+  /*
+   * Доходность портфеля по дням без влияния пополнений и выводов
+   * (взвешенная по времени: дневные доходности перемножаются).
+   * Доходность дня = (стоимость на конец + выплаты − стоимость на начало − покупки + продажи)
+   *                  / (стоимость на начало + покупки дня).
+   * Покупки считаются сделанными в начале дня, продажи — в конце.
+   * income: Map дата → полученные дивиденды и купоны (необязательно).
+   * Возвращает массив { date, growth } — во сколько раз вырос портфель с первого дня (1 = без изменений).
+   */
+  function growthSeries(points, income) {
+    const out = [];
+    let growth = 1;
+    let prev = 0;
+    for (const p of points) {
+      const cash = (income && income.get(p.date)) || 0;
+      const base = prev + (p.inflow || 0);
+      if (base > EPS) {
+        const r = (p.value + cash + (p.outflow || 0) - prev - (p.inflow || 0)) / base;
+        growth *= 1 + Math.max(-1, r);
+      }
+      out.push({ date: p.date, growth });
+      prev = p.value;
+    }
+    return out;
+  }
+
+  // Последнее известное значение на каждую дату (closes по возрастанию дат); до первого — null.
+  function alignCloses(dates, closes) {
+    const out = [];
+    let i = -1;
+    for (const d of dates) {
+      while (closes && i + 1 < closes.length && closes[i + 1][0] <= d) i++;
+      out.push(i >= 0 ? closes[i][1] : null);
+    }
+    return out;
+  }
+
+  /*
+   * Сравнение доходности портфеля с индексом за один и тот же период.
+   * from — начало периода (ISO) или null — с первой сделки. Обе линии начинаются с 0 %:
+   * первая точка — первый день периода, когда в портфеле есть бумаги и известно значение индекса.
+   * Возвращает { points: [{ date, portfolio, bench }], portfolio, bench } (доли: 0,05 = 5 %) или null.
+   */
+  function compareWithBenchmark(points, benchCloses, from, income) {
+    const growth = growthSeries(points, income);
+    const bench = alignCloses(
+      points.map((p) => p.date),
+      benchCloses
+    );
+    let start = -1;
+    for (let i = 0; i < points.length; i++) {
+      if (from && points[i].date < from) continue;
+      if (bench[i] != null && (points[i].value > EPS || (i > 0 && points[i - 1].value > EPS))) {
+        start = i;
+        break;
+      }
+    }
+    if (start < 0) return null;
+    const g0 = growth[start].growth;
+    const b0 = bench[start];
+    const out = [];
+    for (let i = start; i < points.length; i++) {
+      out.push({ date: points[i].date, portfolio: growth[i].growth / g0 - 1, bench: bench[i] / b0 - 1 });
+    }
+    const last = out[out.length - 1];
+    return { points: out, portfolio: last.portfolio, bench: last.bench };
   }
 
   return {
@@ -276,5 +349,8 @@
     buildLedger,
     summarize,
     buildHistory,
+    growthSeries,
+    alignCloses,
+    compareWithBenchmark,
   };
 });

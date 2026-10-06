@@ -2,12 +2,15 @@
 (function () {
   'use strict';
 
-  const { Fmt, Portfolio, Csv, Moex, Charts } = window;
+  const { Fmt, Portfolio, Csv, Moex, Charts, Income } = window;
 
   const DATA_KEY = 'portfolio-tracker:data:v1';
   const CACHE_KEY = 'portfolio-tracker:cache:v1';
   const THEME_KEY = 'portfolio-tracker:theme';
   const RANGE_KEY = 'portfolio-tracker:range';
+  const INCOME_TAB_KEY = 'portfolio-tracker:income-tab';
+  const IMPORT_MAP_KEY = 'portfolio-tracker:import-map:v1';
+  const EVENTS_TTL = 12 * 36e5;
   const BOARD_TTL = 7 * 864e5;
   const MISS_TTL = 864e5;
   const AUTO_REFRESH_AFTER = 10 * 60e3;
@@ -86,12 +89,13 @@
 
   /* ---------- Состояние и хранение ---------- */
 
+  // Новые поля добавлены в ту же запись v1: старые данные читаются без изменений.
   function emptyData() {
-    return { trades: [], manualPrices: {}, nextSeq: 1 };
+    return { trades: [], manualPrices: {}, nextSeq: 1, incomeManual: [], incomeExcluded: [], settings: { taxRate: 0.13, benchIncome: false } };
   }
 
   function emptyCache() {
-    return { boards: {}, quotes: {}, history: {} };
+    return { boards: {}, quotes: {}, history: {}, events: {}, bench: null };
   }
 
   let data = emptyData();
@@ -105,6 +109,8 @@
     lastRefresh: 0,
     status: null,
     range: 'all',
+    incomeTab: 'upcoming',
+    importState: null,
     showClosed: false,
     filter: '',
     editingId: null,
@@ -160,6 +166,18 @@
         }
       }
     }
+    if (raw && Array.isArray(raw.incomeManual)) {
+      for (const m of raw.incomeManual) {
+        if (!m || typeof m !== 'object') continue;
+        const { item } = Income.parseManual(m, null);
+        if (item) d.incomeManual.push(Object.assign(item, { id: typeof m.id === 'string' && m.id ? m.id : newId(0) }));
+      }
+    }
+    if (raw && Array.isArray(raw.incomeExcluded)) d.incomeExcluded = raw.incomeExcluded.filter((k) => typeof k === 'string');
+    if (raw && raw.settings && typeof raw.settings === 'object') {
+      if (Income.TAX_RATES.includes(raw.settings.taxRate)) d.settings.taxRate = raw.settings.taxRate;
+      d.settings.benchIncome = raw.settings.benchIncome === true;
+    }
     data = d;
   }
 
@@ -174,24 +192,28 @@
     const raw = readJSON(CACHE_KEY);
     const c = emptyCache();
     if (raw && typeof raw === 'object') {
-      for (const k of ['boards', 'quotes', 'history']) {
+      for (const k of ['boards', 'quotes', 'history', 'events']) {
         if (raw[k] && typeof raw[k] === 'object') c[k] = raw[k];
       }
+      if (raw.bench && Array.isArray(raw.bench.closes)) c.bench = raw.bench;
     }
     for (const [tk, hst] of Object.entries(c.history)) {
       if (!hst || !Array.isArray(hst.closes)) delete c.history[tk];
+    }
+    for (const [tk, ev] of Object.entries(c.events)) {
+      if (!ev || !Array.isArray(ev.items) || !['dividend', 'coupon'].includes(ev.kind)) delete c.events[tk];
     }
     cache = c;
   }
 
   function saveCache() {
     const keep = new Set(data.trades.map((t) => t.ticker));
-    for (const k of ['boards', 'quotes', 'history']) {
+    for (const k of ['boards', 'quotes', 'history', 'events']) {
       for (const tk of Object.keys(cache[k])) if (!keep.has(tk)) delete cache[k][tk];
     }
     if (!writeJSON(CACHE_KEY, cache)) {
       // История занимает больше всего места: без неё кэш точно поместится.
-      writeJSON(CACHE_KEY, { boards: cache.boards, quotes: cache.quotes, history: {} });
+      writeJSON(CACHE_KEY, { boards: cache.boards, quotes: cache.quotes, history: {}, events: cache.events, bench: null });
     }
   }
 
@@ -256,8 +278,15 @@
     const closes = new Map();
     for (const [tk, hst] of Object.entries(cache.history)) closes.set(tk, hst.closes);
     const history = Portfolio.buildHistory(data.trades, closes, today, prices);
+    const events = new Map(Object.entries(cache.events));
+    const income = Income.build(data.trades, events, {
+      today,
+      taxRate: data.settings.taxRate,
+      excluded: new Set(data.incomeExcluded),
+      manual: data.incomeManual,
+    });
     ui.ledger = ledger;
-    return { today, infos, summary, history };
+    return { today, infos, summary, history, income };
   }
 
   // До шести долей; цвета закреплены за бумагами в порядке первой покупки.
@@ -296,7 +325,9 @@
     renderPriceWarning(vm);
     renderAllocation(vm, slices);
     renderHistory(vm);
+    renderBench(vm);
     renderPositions(vm, colorOf);
+    renderIncome(vm);
     renderTrades();
     renderTickerLists();
     renderStatus();
@@ -321,16 +352,19 @@
         kpi('Текущая стоимость', '—', 'Добавьте первую сделку — форма ниже', { hero: true }),
         kpi('Прибыль/убыток всего', '—', 'с учётом продаж и комиссий'),
         kpi('Нереализованная', '—', 'по открытым позициям'),
-        kpi('Реализованная', '—', 'по проданным бумагам')
+        kpi('Реализованная', '—', 'по проданным бумагам'),
+        kpi('Дивиденды и купоны', '—', 'получено после налога')
       );
       return;
     }
+    const inc = vm.income.totals;
+    const withIncome = t.totalPnl + inc.receivedNet;
     const n = t.openCount;
     box.replaceChildren(
       kpi(
         'Текущая стоимость',
         Fmt.money(t.value),
-        n + ' ' + plural(n, 'бумага', 'бумаги', 'бумаг') + ' · себестоимость ' + Fmt.money(t.cost, { digits: 0 }),
+        n + ' ' + plural(n, 'бумага', 'бумаги', 'бумаг') + ' · себестоимость ' + Fmt.money(t.cost, { digits: 0 }) + ' · комиссии за всё время ' + Fmt.money(t.fees),
         { hero: true }
       ),
       kpi('Прибыль/убыток всего', Fmt.money(t.totalPnl, { sign: true }), Fmt.pct(t.totalPnlPct) + ' к сумме покупок', {
@@ -340,7 +374,13 @@
         tone: tone(t.unrealized),
       }),
       kpi('Реализованная', Fmt.money(t.realized, { sign: true }), 'по проданным бумагам', { tone: tone(t.realized) }),
-      kpi('Комиссии', Fmt.money(t.fees), 'уплачено за всё время')
+      kpi(
+        'Дивиденды и купоны',
+        Fmt.money(inc.receivedNet),
+        'получено после налога · итог с выплатами ' + Fmt.money(withIncome, { sign: true, digits: 0 }) +
+          (t.buyCost > 0 ? ' (' + Fmt.pct(withIncome / t.buyCost) + ')' : ''),
+        { tone: inc.receivedNet > 0 ? 'pos' : '' }
+      )
     );
   }
 
@@ -398,7 +438,7 @@
     const sub = $('history-sub');
     const note = $('history-note');
     const table = $('history-table');
-    document.querySelectorAll('#range button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === ui.range)));
+    document.querySelectorAll('button[data-range]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === ui.range)));
 
     $('history-legend').hidden = !pts.length;
     $('history-table-details').hidden = !pts.length;
@@ -470,6 +510,79 @@
     );
   }
 
+  // Разница доходностей — в процентных пунктах.
+  function pp(v) {
+    return Fmt.pct(v).replace(/\s%$/, ' п. п.');
+  }
+
+  function pctAxis(v, step) {
+    const digits = step >= 0.01 - 1e-12 ? 0 : step >= 0.001 - 1e-12 ? 1 : 2;
+    return Fmt.pct(v, { digits, sign: v !== 0 });
+  }
+
+  function renderBench(vm) {
+    const box = $('bench-chart');
+    const sub = $('bench-sub');
+    const note = $('bench-note');
+    const pts = vm.history.points;
+    $('bench-income').checked = data.settings.benchIncome;
+    const empty = (text) => {
+      box.__chart = null;
+      box.replaceChildren(h('div', { class: 'chart-empty', text }));
+      sub.textContent = '';
+      $('bench-tools').hidden = !pts.length;
+      $('bench-range').hidden = !pts.length;
+    };
+    if (!pts.length) {
+      empty('График появится после первой сделки');
+      note.textContent = '';
+      return;
+    }
+    const closes = cache.bench && cache.bench.closes;
+    const from = ui.range === 'all' ? null : Fmt.addMonths(vm.today, -Number(ui.range));
+    const income = data.settings.benchIncome ? Income.cashByDate(vm.income) : null;
+    const cmp = closes && closes.length ? Portfolio.compareWithBenchmark(pts, closes, from, income) : null;
+    if (!cmp || cmp.points.length < 2) {
+      empty(ui.refreshing || ui.historyLoading ? 'Загружаю значения индекса IMOEX…' : cmp ? 'Слишком короткий период для сравнения' : 'Нет данных индекса IMOEX — MOEX ISS недоступен. Нажмите «Обновить цены».');
+      note.textContent = '';
+      return;
+    }
+    $('bench-tools').hidden = false;
+    $('bench-range').hidden = false;
+    Charts.renderLineChart(box, {
+      points: cmp.points,
+      series: [
+        { key: 'portfolio', label: 'портфель', cls: 's-value' },
+        { key: 'bench', label: 'IMOEX', cls: 's-bench' },
+      ],
+      includeZero: true,
+      axisFormat: pctAxis,
+      valueFormat: (v) => Fmt.pct(v),
+      valueTone: tone,
+      tipExtra: (p) => {
+        const diff = p.portfolio - p.bench;
+        return [{ value: pp(diff), label: 'разница', tone: tone(diff) }];
+      },
+      ariaLabel:
+        'Доходность портфеля и индекса IMOEX с ' + Fmt.date(cmp.points[0].date) + ' по ' + Fmt.date(cmp.points[cmp.points.length - 1].date) +
+        '. Стрелки влево и вправо перемещают по датам.',
+    });
+    const diff = cmp.portfolio - cmp.bench;
+    sub.replaceChildren(
+      'С ' + Fmt.date(cmp.points[0].date) + ': портфель ',
+      h('span', { class: tone(cmp.portfolio), text: Fmt.pct(cmp.portfolio) }),
+      ', IMOEX ',
+      h('span', { class: tone(cmp.bench), text: Fmt.pct(cmp.bench) }),
+      ', разница ',
+      h('span', { class: tone(diff), text: pp(diff) })
+    );
+    const approx = [...vm.history.approximated].filter((tk) => data.trades.some((t) => t.ticker === tk));
+    note.textContent =
+      'Доходность портфеля не зависит от пополнений и выводов. IMOEX — ценовой индекс без дивидендов' +
+      (data.settings.benchIncome ? '; в доходность портфеля включены полученные дивиденды и купоны.' : '.') +
+      (approx.length ? ' Для ' + approx.join(', ') + ' нет истории котировок — между сделками используются их цены.' : '');
+  }
+
   function moneyWithPct(v, ratio) {
     const frag = [h('span', { class: tone(v), text: Fmt.money(v, { sign: true }) })];
     if (Number.isFinite(ratio)) frag.push(h('span', { class: 'sub ' + tone(v), text: Fmt.pct(ratio) }));
@@ -485,7 +598,7 @@
       h(
         'tr',
         null,
-        ['Бумага', 'Кол-во', 'Средняя цена', 'Текущая цена', 'Стоимость', 'Доля', 'Нереализованная прибыль/убыток', 'Реализованная', 'Итого прибыль/убыток'].map((t) =>
+        ['Бумага', 'Кол-во', 'Средняя цена', 'Текущая цена', 'Стоимость', 'Доля', 'Нереализованная прибыль/убыток', 'Реализованная', 'Выплаты после налога', 'Итого прибыль/убыток'].map((t) =>
           h('th', { scope: 'col', text: t })
         )
       )
@@ -506,10 +619,15 @@
       );
     };
 
+    const paid = vm.income.byTicker;
+    const paidCell = (tk) => {
+      const v = paid.get(tk) || 0;
+      return h('td', { class: tone(v), text: v > 0 ? Fmt.money(v, { sign: true }) : '—' });
+    };
     const body = h('tbody');
     if (!positions.length && !(ui.showClosed && closed.length)) {
       body.append(
-        h('tr', { class: 'empty-row' }, h('td', { colspan: 9, text: data.trades.length ? 'Открытых позиций нет.' : 'Позиций пока нет — добавьте сделку в форме ниже.' }))
+        h('tr', { class: 'empty-row' }, h('td', { colspan: 10, text: data.trades.length ? 'Открытых позиций нет.' : 'Позиций пока нет — добавьте сделку в форме ниже.' }))
       );
     }
     for (const p of positions) {
@@ -536,6 +654,7 @@
           h('td', { text: Fmt.pct(p.weight, { sign: false, digits: 1 }) }),
           h('td', null, moneyWithPct(p.unrealized, p.unrealizedPct)),
           h('td', { class: tone(p.realized), text: Math.abs(p.realized) < 0.005 ? '—' : Fmt.money(p.realized, { sign: true }) }),
+          paidCell(p.ticker),
           h('td', null, moneyWithPct(p.totalPnl, p.totalPnlPct))
         )
       );
@@ -554,6 +673,7 @@
             h('td', { text: '—' }),
             h('td', { text: '—' }),
             h('td', { class: tone(p.realized), text: Fmt.money(p.realized, { sign: true }) }),
+            paidCell(p.ticker),
             h('td', null, moneyWithPct(p.totalPnl, p.totalPnlPct))
           )
         );
@@ -576,6 +696,7 @@
           h('td', { text: totals.value > 0 ? '100 %' : '—' }),
           h('td', null, moneyWithPct(totals.unrealized, totals.unrealizedPct)),
           h('td', { class: tone(totals.realized), text: Fmt.money(totals.realized, { sign: true }) }),
+          h('td', { class: tone(vm.income.totals.receivedNet), text: Fmt.money(vm.income.totals.receivedNet, { sign: true }) }),
           h('td', null, moneyWithPct(totals.totalPnl, totals.totalPnlPct))
         )
       );
@@ -583,6 +704,180 @@
     table.replaceChildren(head, body);
     if (foot) table.append(foot);
     $('show-closed').parentElement.hidden = !closed.length;
+  }
+
+  const MONTHS_FULL = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+
+  function monthTitle(iso) {
+    const m = MONTHS_FULL[+iso.slice(5, 7) - 1];
+    return m[0].toUpperCase() + m.slice(1) + ' ' + iso.slice(0, 4);
+  }
+
+  function kindPill(it) {
+    return h('span', { class: 'kind-pill' + (it.source === 'manual' ? ' manual' : ''), title: it.source === 'manual' ? 'Внесено вручную' : 'По данным MOEX ISS', text: Income.KIND_LABEL[it.kind] + (it.source === 'manual' ? ' · вручную' : '') });
+  }
+
+  function payDateCell(it) {
+    return h('td', { title: it.payEstimated ? 'Биржа не публикует дату выплаты дивидендов: оценка — 10 рабочих дней после даты реестра' : null }, it.payEstimated ? h('span', { class: 'est', text: '≈ ' + Fmt.date(it.payDate) }) : Fmt.date(it.payDate));
+  }
+
+  function renderIncome(vm) {
+    const table = $('income-table');
+    const inc = vm.income;
+    const tab = ui.incomeTab;
+    document.querySelectorAll('#income-tabs button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.tab === tab)));
+    $('tax-rate').value = String(data.settings.taxRate);
+    const tz = inc.totals;
+    const subParts = ['Получено после налога: ' + Fmt.money(tz.receivedNet)];
+    if (tz.receivedNet > 0) subParts.push('дивиденды ' + Fmt.money(tz.dividends, { digits: 0 }) + ', купоны ' + Fmt.money(tz.coupons, { digits: 0 }));
+    subParts.push('ожидается за 12 месяцев: ' + Fmt.money(tz.expectedNet) + (tz.expectedUnknown ? ' + ' + tz.expectedUnknown + ' ' + plural(tz.expectedUnknown, 'выплата', 'выплаты', 'выплат') + ' без объявленного размера' : ''));
+    $('income-sub').textContent = data.trades.length || data.incomeManual.length ? subParts.join(' · ') : '';
+
+    const body = h('tbody');
+    let head;
+    const taxLabel = data.settings.taxRate ? 'После налога ' + Math.round(data.settings.taxRate * 100) + ' %' : 'К зачислению';
+    if (tab === 'upcoming') {
+      head = h('thead', null, h('tr', null, ['Дата выплаты', 'Бумага', 'Вид', 'Дата реестра', 'На 1 шт.', 'Кол-во', 'Сумма до налога', taxLabel].map((t, i) => h('th', { scope: 'col', class: i === 1 || i === 2 ? 'left' : null, text: t }))));
+      const list = inc.upcoming;
+      if (!list.length) {
+        body.append(h('tr', { class: 'empty-row' }, h('td', { colspan: 8, text: data.trades.length ? (ui.refreshing || ui.historyLoading ? 'Загружаю календарь выплат MOEX…' : 'Объявленных выплат по бумагам портфеля пока нет.') : 'Здесь появятся будущие дивиденды и купоны по вашим бумагам.' })));
+      }
+      let month = '';
+      for (const it of list) {
+        const m = it.payDate.slice(0, 7);
+        if (m !== month) {
+          month = m;
+          const inMonth = list.filter((x) => x.payDate.slice(0, 7) === m);
+          const known = inMonth.filter((x) => x.net != null);
+          const sum = known.reduce((a, x) => a + x.net, 0);
+          const sumText = !known.length ? 'размер не объявлен' : 'ожидается ' + Fmt.money(sum) + (known.length < inMonth.length ? ' + не объявленные' : '');
+          body.append(h('tr', { class: 'month' }, h('td', { colspan: 8 }, monthTitle(it.payDate), h('span', { class: 'month-sum', text: sumText }))));
+        }
+        body.append(
+          h(
+            'tr',
+            null,
+            payDateCell(it),
+            h('td', { class: 'left' }, h('span', { class: 'ticker', text: it.ticker })),
+            h('td', { class: 'left' }, kindPill(it)),
+            h('td', { text: it.recordDate ? Fmt.date(it.recordDate) : '—' }),
+            h('td', { text: it.perUnit != null ? Fmt.price(it.perUnit) : 'не объявлен' }),
+            h('td', { text: it.qty != null ? Fmt.qty(it.qty) : '—' }),
+            h('td', { text: it.gross != null ? Fmt.money(it.gross) : '—' }),
+            h('td', { text: it.net != null ? Fmt.money(it.net) : '—' })
+          )
+        );
+      }
+    } else {
+      head = h('thead', null, h('tr', null, ['Дата выплаты', 'Бумага', 'Вид', 'На 1 шт.', 'Кол-во', 'До налога', 'Налог', 'Получено', ''].map((t, i) => h('th', { scope: 'col', class: i === 1 || i === 2 ? 'left' : null, text: t }))));
+      const list = inc.received;
+      if (!list.length) {
+        body.append(h('tr', { class: 'empty-row' }, h('td', { colspan: 9, text: data.trades.length ? 'Выплат по вашим бумагам пока не было.' : 'Здесь появятся полученные дивиденды и купоны.' })));
+      }
+      for (const it of list) {
+        let action;
+        if (it.source === 'manual') {
+          action = h('button', { type: 'button', class: 'btn small', onclick: () => deleteManualIncome(it.id), 'aria-label': 'Удалить выплату ' + it.ticker + ' от ' + Fmt.date(it.payDate), text: 'Удалить' });
+        } else {
+          action = h('button', {
+            type: 'button',
+            class: 'btn small',
+            title: it.excluded ? 'Снова учитывать эту выплату' : 'Не учитывать (например, если брокер зачислил другую сумму — её можно добавить вручную)',
+            onclick: () => toggleIncome(it.key),
+            text: it.excluded ? 'Учитывать' : 'Не учитывать',
+          });
+        }
+        body.append(
+          h(
+            'tr',
+            { class: it.excluded ? 'excluded' : null, title: it.note || null },
+            payDateCell(it),
+            h('td', { class: 'left' }, h('span', { class: 'ticker', text: it.ticker }), it.note ? h('span', { class: 'name', text: it.note }) : null),
+            h('td', { class: 'left' }, kindPill(it)),
+            h('td', { text: it.perUnit != null ? Fmt.price(it.perUnit) : '—' }),
+            h('td', { text: it.qty != null ? Fmt.qty(it.qty) : '—' }),
+            h('td', { text: it.gross != null ? Fmt.money(it.gross) : it.source === 'manual' ? '—' : 'не известно' }),
+            h('td', { text: it.tax != null ? Fmt.money(it.tax) : '—' }),
+            h('td', { class: it.net != null && !it.excluded ? 'pos' : '', text: it.net != null ? Fmt.money(it.net) : '—' }),
+            h('td', { class: 'actions' }, action)
+          )
+        );
+      }
+    }
+    table.replaceChildren(head, body);
+
+    const noData = [...new Set(data.trades.map((t) => t.ticker))].filter((tk) => {
+      const b = cache.boards[tk];
+      return b && (b.status === 'notfound' || (b.status === 'unsupported' && b.market !== 'bonds'));
+    });
+    const parts = [];
+    if (tab === 'upcoming') parts.push('Календарь — по объявленным биржей выплатам и текущему количеству бумаг. Даты выплат дивидендов со знаком ≈ — оценка.');
+    if (noData.length) parts.push('Нет данных о выплатах MOEX для ' + noData.join(', ') + ' — такие выплаты можно добавить вручную.');
+    $('income-note').textContent = parts.join(' ');
+  }
+
+  function toggleIncome(key) {
+    const set = new Set(data.incomeExcluded);
+    if (set.has(key)) set.delete(key);
+    else set.add(key);
+    data.incomeExcluded = [...set];
+    saveData();
+    renderAll();
+  }
+
+  function deleteManualIncome(id) {
+    const m = data.incomeManual.find((x) => x.id === id);
+    if (!m) return;
+    if (!window.confirm('Удалить выплату ' + m.ticker + ' от ' + Fmt.date(m.date) + ' на ' + Fmt.money(m.amount) + '?')) return;
+    data.incomeManual = data.incomeManual.filter((x) => x.id !== id);
+    saveData();
+    renderAll();
+  }
+
+  const incomeForm = $('income-form');
+
+  function openIncomeDialog() {
+    incomeForm.reset();
+    incomeForm.date.value = Fmt.todayISO();
+    incomeForm.date.max = Fmt.todayISO();
+    incomeForm.querySelectorAll('.field-error').forEach((e) => (e.textContent = ''));
+    incomeForm.querySelectorAll('[aria-invalid]').forEach((e) => e.removeAttribute('aria-invalid'));
+    $('income-dialog').showModal();
+    incomeForm.ticker.focus();
+  }
+
+  function saveManualIncome(e) {
+    e.preventDefault();
+    incomeForm.querySelectorAll('.field-error').forEach((x) => (x.textContent = ''));
+    incomeForm.querySelectorAll('[aria-invalid]').forEach((x) => x.removeAttribute('aria-invalid'));
+    const raw = {
+      ticker: incomeForm.ticker.value,
+      date: incomeForm.date.value,
+      kind: incomeForm.kind.value,
+      amount: incomeForm.amount.value,
+      note: incomeForm.note.value,
+    };
+    const { item, errors } = Income.parseManual(raw, Fmt.todayISO());
+    if (!item) {
+      let first = null;
+      for (const [field, msg] of Object.entries(errors)) {
+        const slot = incomeForm.querySelector('.field-error[data-for="' + field + '"]');
+        if (slot) slot.textContent = msg;
+        const input = incomeForm.elements[field];
+        if (input && input.setAttribute) {
+          input.setAttribute('aria-invalid', 'true');
+          first = first || input;
+        }
+      }
+      if (first && first.focus) first.focus();
+      return;
+    }
+    data.incomeManual.push(Object.assign(item, { id: newId(data.incomeManual.length + 1) }));
+    saveData();
+    $('income-dialog').close();
+    ui.incomeTab = 'received';
+    renderAll();
+    if (ui.storageOk) setStatus('ok', 'Выплата добавлена: ' + item.ticker + ', ' + Fmt.money(item.amount));
   }
 
   function renderTrades() {
@@ -748,6 +1043,40 @@
         });
         saveCache();
       }
+
+      // 4. Дивиденды и купоны (обновляются раз в 12 часов) и значения индекса IMOEX.
+      if (!down) {
+        const evJobs = tickers.filter((tk) => {
+          const b = cache.boards[tk];
+          if (!b || !(b.status === 'ok' || (b.status === 'unsupported' && b.market === 'bonds'))) return false;
+          const ev = cache.events[tk];
+          return !ev || now - (ev.fetchedAt || 0) > EVENTS_TTL;
+        });
+        await pool(evJobs, 3, async (tk) => {
+          const kind = cache.boards[tk].status === 'ok' ? 'dividend' : 'coupon';
+          const items = await call(() => (kind === 'dividend' ? Moex.fetchDividends(tk) : Moex.fetchCoupons(tk)));
+          if (items) cache.events[tk] = { kind, items, fetchedAt: Date.now() };
+        });
+
+        // Индекс — с запасом в неделю до первой сделки, чтобы было значение на её дату.
+        const need = Fmt.addDays(Portfolio.sortTrades(data.trades)[0].date, -7);
+        const bc = cache.bench;
+        if (!bc || bc.from > need) {
+          const closes = await call(() => Moex.fetchIndexCloses(need, today));
+          if (closes) cache.bench = { from: need, till: today, closes };
+        } else {
+          // Последний день перезапрашиваем: во время торгов его значение меняется.
+          const lastDate = bc.closes.length ? bc.closes[bc.closes.length - 1][0] : bc.from;
+          const fresh = await call(() => Moex.fetchIndexCloses(lastDate, today));
+          if (fresh) {
+            const merged = new Map(bc.closes);
+            for (const [d, c] of fresh) merged.set(d, c);
+            bc.closes = [...merged.entries()].sort((x, y) => (x[0] < y[0] ? -1 : 1));
+            bc.till = today;
+          }
+        }
+        saveCache();
+      }
     } finally {
       ui.busy = false;
       ui.refreshing = false;
@@ -756,7 +1085,7 @@
       $('refresh-btn').disabled = false;
     }
 
-    const missing = tickers.filter((tk) => cache.boards[tk] && cache.boards[tk].status !== 'ok');
+    const missing = tickers.filter((tk) => cache.boards[tk] && cache.boards[tk].status !== 'ok' && !data.manualPrices[tk] && ui.ledger.get(tk) && ui.ledger.get(tk).qty > 0);
     if (down) {
       setStatus('warn', 'MOEX ISS недоступен (' + down.message + '). Используются сохранённые котировки и цены, введённые вручную.');
     } else {
@@ -1053,6 +1382,30 @@
       download('portfolio-positions-' + today + '.csv', Csv.toCSV(rows));
       return;
     }
+    if (kind === 'income') {
+      const STATUS = { received: 'получено', expected: 'ожидается' };
+      const rows = [['Дата выплаты', 'Дата выплаты — оценка', 'Тикер', 'Вид', 'Статус', 'Дата реестра', 'На 1 шт., ₽', 'Количество', 'До налога, ₽', 'Налог, ₽', 'После налога, ₽', 'Источник', 'Учитывается', 'Комментарий']];
+      for (const it of vm.income.items) {
+        rows.push([
+          it.payDate,
+          it.payEstimated ? 'да' : '',
+          it.ticker,
+          Income.KIND_LABEL[it.kind],
+          STATUS[it.status],
+          it.recordDate || '',
+          it.perUnit != null ? Csv.num(it.perUnit) : '',
+          it.qty != null ? Csv.num(it.qty) : '',
+          it.gross != null ? Csv.num(it.gross, 2) : '',
+          it.tax != null ? Csv.num(it.tax, 2) : '',
+          it.net != null ? Csv.num(it.net, 2) : '',
+          it.source === 'manual' ? 'вручную' : 'MOEX ISS',
+          it.excluded ? 'нет' : 'да',
+          Csv.text(it.note || ''),
+        ]);
+      }
+      download('portfolio-income-' + today + '.csv', Csv.toCSV(rows));
+      return;
+    }
     const rows = [['Дата', 'Стоимость, ₽', 'Чистые вложения, ₽', 'Прибыль/убыток, ₽']];
     for (const p of vm.history.points) rows.push([p.date, Csv.num(p.value, 2), Csv.num(p.invested, 2), Csv.num(p.value - p.invested, 2)]);
     download('portfolio-history-' + today + '.csv', Csv.toCSV(rows));
@@ -1088,6 +1441,28 @@
     $('import-dialog').showModal();
   }
 
+  function readImportMaps() {
+    try {
+      const m = JSON.parse(localStorage.getItem(IMPORT_MAP_KEY) || '{}');
+      return m && typeof m === 'object' ? m : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function rememberImportMap(sig, mapping, sideMap) {
+    const all = readImportMaps();
+    all[sig] = { mapping, sideMap, savedAt: Date.now() };
+    // Храним несколько последних форматов отчётов.
+    const keys = Object.keys(all).sort((a, b) => (all[b].savedAt || 0) - (all[a].savedAt || 0));
+    for (const k of keys.slice(10)) delete all[k];
+    try {
+      localStorage.setItem(IMPORT_MAP_KEY, JSON.stringify(all));
+    } catch (e) {
+      /* не критично */
+    }
+  }
+
   async function onImportFile(e) {
     const file = e.target.files && e.target.files[0];
     e.target.value = '';
@@ -1096,41 +1471,237 @@
       importDialog('Импорт сделок', ['Файл слишком большой (больше 5 МБ).'], [{ label: 'Закрыть', primary: true }]);
       return;
     }
-    const text = await readFileText(file);
-    const { trades, errors } = Csv.parseTradesCSV(text, Fmt.todayISO());
-    if (errors.length) {
-      const shown = errors.slice(0, 12);
+    if (/\.(xlsx?|xlsm|ods|pdf|html?)$/i.test(file.name)) {
       importDialog(
-        'Файл не импортирован',
-        [
-          'Исправьте ошибки и попробуйте снова. Ожидаемые столбцы: ' + Csv.TRADE_HEADER.join('; ') + '.',
-          h('ul', null, shown.map((m) => h('li', { text: m })), errors.length > shown.length ? h('li', { text: '…и ещё ' + (errors.length - shown.length) }) : null),
-        ],
+        'Нужен файл CSV',
+        ['Откройте отчёт брокера в Excel и сохраните его как «CSV UTF-8 (разделитель — запятая)» или «CSV (разделители — точка с запятой)», затем выберите этот файл.'],
         [{ label: 'Закрыть', primary: true }]
       );
       return;
     }
-    if (!trades.length) {
-      importDialog('Импорт сделок', ['В файле нет сделок.'], [{ label: 'Закрыть', primary: true }]);
+    const text = await readFileText(file);
+    const rows = Csv.parseCSV(text);
+    if (!rows.length) {
+      importDialog('Импорт сделок', ['Файл пустой.'], [{ label: 'Закрыть', primary: true }]);
       return;
     }
-    if (!data.trades.length) {
-      applyImport(trades, 'replace');
-      return;
-    }
-    const n = trades.length;
-    importDialog(
-      'Импорт сделок',
-      [
-        'В файле ' + n + ' ' + plural(n, 'сделка', 'сделки', 'сделок') + '. Сейчас в трекере ' + data.trades.length + ' ' +
-          plural(data.trades.length, 'сделка', 'сделки', 'сделок') + '.',
-      ],
-      [
-        { label: 'Отмена' },
-        { label: 'Добавить к текущим', action: () => applyImport(trades, 'append') },
-        { label: 'Заменить', primary: true, action: () => applyImport(trades, 'replace') },
-      ]
+    const headerRow = Csv.findHeaderRow(rows);
+    const st = { fileName: file.name, rows, headerRow, mapping: null, sideMap: {}, mode: data.trades.length ? 'append' : 'replace', skipErrors: false, skipDuplicates: true, result: null };
+    setImportHeader(st, headerRow);
+    ui.importState = st;
+    renderImport();
+    $('map-dialog').showModal();
+  }
+
+  // Новая строка заголовка → сопоставление заново (или запомненное для такого же отчёта).
+  function setImportHeader(st, headerRow) {
+    st.headerRow = headerRow;
+    const header = st.rows[headerRow] || [];
+    st.sig = Csv.headerSignature(header);
+    const saved = readImportMaps()[st.sig];
+    st.mapping = saved && saved.mapping ? Object.assign(Csv.guessMapping(header), saved.mapping) : Csv.guessMapping(header);
+    st.sideMap = saved && saved.sideMap ? Object.assign({}, saved.sideMap) : {};
+    st.remembered = !!saved;
+  }
+
+  function colLetter(i) {
+    let s = '';
+    for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+    return s;
+  }
+
+  function clip(v, n) {
+    const str = String(v == null ? '' : v).trim();
+    return str.length > n ? str.slice(0, n - 1) + '…' : str;
+  }
+
+  function renderImport() {
+    const st = ui.importState;
+    if (!st) return;
+    const rows = st.rows;
+    const header = rows[st.headerRow] || [];
+    const sample = rows[st.headerRow + 1] || [];
+    const width = Math.max(...rows.slice(st.headerRow, st.headerRow + 50).map((r) => r.length));
+    const colName = (i) => colLetter(i) + ': ' + (clip(header[i], 40) || 'без названия');
+
+    // Сопоставление → сделки.
+    const sideValues = st.mapping.side >= 0 ? Csv.distinctValues(rows, st.headerRow + 1, st.mapping.side, 30) : [];
+    for (const v of sideValues) if (!(v in st.sideMap)) st.sideMap[v] = Csv.guessSide(v);
+    const res = Csv.mapRows(rows, st.headerRow, st.mapping, st.sideMap, Fmt.todayISO());
+    const dup = st.mode === 'append' ? Csv.findDuplicates(data.trades, res.trades) : new Set();
+    st.result = res;
+    st.dup = dup;
+    const fatal = res.errors.length === 1 && res.errors[0].row === 0;
+    const importable = res.trades.length - (st.skipDuplicates ? dup.size : 0);
+
+    const nodes = [];
+    nodes.push(
+      h(
+        'p',
+        { class: 'map-hint' },
+        'Файл «' + clip(st.fileName, 60) + '»: ' + rows.length + ' ' + plural(rows.length, 'строка', 'строки', 'строк') + '. ' +
+          'Укажите, в каком столбце что находится — сайт подставил то, что узнал' + (st.remembered ? ' (и сопоставление, сохранённое при прошлом импорте такого отчёта)' : '') + '. Поля со звёздочкой обязательны.'
+      )
     );
+
+    // Строка заголовка.
+    const headerOptions = rows.slice(0, 40).map((r, i) => h('option', { value: String(i), text: 'Строка ' + (r.line || i + 1) + ': ' + clip(r.filter((c) => c.trim()).join(' · '), 90) }));
+    const headerSel = h('select', { id: 'map-header', 'aria-label': 'Строка с названиями столбцов' }, headerOptions);
+    headerSel.value = String(st.headerRow);
+    headerSel.addEventListener('change', () => {
+      setImportHeader(st, Number(headerSel.value));
+      renderImport();
+    });
+    nodes.push(h('div', { class: 'map-section' }, h('h4', { text: '1. Строка с названиями столбцов' }), headerSel));
+
+    // Поля.
+    const grid = h('div', { class: 'map-grid' });
+    for (const f of Csv.FIELDS) {
+      const sel = h('select', { 'data-field': f.key });
+      const none = f.key === 'side' ? '— нет: покупка/продажа по знаку количества —' : f.required ? '— выберите столбец —' : '— нет в файле —';
+      sel.append(h('option', { value: '-1', text: none }));
+      for (let i = 0; i < width; i++) sel.append(h('option', { value: String(i), text: colName(i) }));
+      sel.value = String(st.mapping[f.key]);
+      sel.addEventListener('change', () => {
+        st.mapping[f.key] = Number(sel.value);
+        renderImport();
+      });
+      const unset = f.required && st.mapping[f.key] < 0;
+      const col = st.mapping[f.key];
+      const example = col >= 0 && sample[col] ? 'например: ' + clip(sample[col], 40) : '';
+      grid.append(
+        h('label', { class: 'map-row' + (f.required ? ' req' : '') + (unset ? ' unset' : '') }, h('span', { text: f.label }), sel, example ? h('small', { class: 'muted', text: example }) : null)
+      );
+    }
+    nodes.push(
+      h(
+        'div',
+        { class: 'map-section' },
+        h('h4', { text: '2. Столбцы' }),
+        h('p', { class: 'map-hint', text: 'Если в отчёте нет цены за штуку, выберите «Сумма сделки» — цена будет посчитана как сумма / количество. Две комиссии (брокера и биржи) складываются.' }),
+        grid
+      )
+    );
+
+    // Значения операции.
+    if (st.mapping.side >= 0) {
+      const box = h('div', { class: 'side-map' });
+      if (!sideValues.length) box.append(h('span', { class: 'muted', text: 'В выбранном столбце нет значений.' }));
+      for (const v of sideValues) {
+        const sel = h(
+          'select',
+          { 'aria-label': 'Значение «' + v + '»' },
+          h('option', { value: 'buy', text: 'Покупка' }),
+          h('option', { value: 'sell', text: 'Продажа' }),
+          h('option', { value: 'skip', text: 'Пропустить строку' })
+        );
+        sel.value = st.sideMap[v];
+        sel.addEventListener('change', () => {
+          st.sideMap[v] = sel.value;
+          renderImport();
+        });
+        box.append(h('span', { class: 'val', title: v, text: v }), sel);
+      }
+      nodes.push(h('div', { class: 'map-section' }, h('h4', { text: '3. Что означают значения в столбце операции' }), box));
+    }
+
+    // Итог и предпросмотр.
+    const summary = h('div', { class: 'map-summary' });
+    if (fatal) {
+      summary.append(h('span', { class: 'neg', text: res.errors[0].message }));
+    } else {
+      summary.append(h('span', null, 'Сделок найдено: ', h('b', { text: String(res.trades.length) })));
+      if (res.skipped.length) summary.append(h('span', { title: res.skipped.slice(0, 20).map((x) => 'строка ' + x.row + ': ' + x.reason).join('\n') }, 'Пропущено строк: ', h('b', { text: String(res.skipped.length) }), ' (служебные и другие операции)'));
+      if (res.errors.length) summary.append(h('span', { class: 'neg' }, 'С ошибками: ', h('b', { text: String(res.errors.length) })));
+      if (dup.size) summary.append(h('span', null, 'Уже есть в трекере: ', h('b', { text: String(dup.size) })));
+    }
+    const section = h('div', { class: 'map-section map-preview' }, h('h4', { text: (st.mapping.side >= 0 ? '4' : '3') + '. Проверка' }), summary);
+    if (!fatal && res.errors.length) {
+      section.append(h('ul', { class: 'map-errors' }, res.errors.slice(0, 15).map((er) => h('li', { text: 'Строка ' + er.row + ': ' + er.message })), res.errors.length > 15 ? h('li', { text: '…и ещё ' + (res.errors.length - 15) }) : null));
+    }
+    if (res.trades.length) {
+      const shown = res.trades.slice(0, 6);
+      section.append(
+        h(
+          'div',
+          { class: 'table-wrap' },
+          h(
+            'table',
+            { class: 'data' },
+            h('thead', null, h('tr', null, ['Строка', 'Дата', 'Бумага', 'Операция', 'Кол-во', 'Цена', 'Комиссия'].map((t, i) => h('th', { class: i === 2 || i === 3 ? 'left' : null, text: t })))),
+            h(
+              'tbody',
+              null,
+              shown.map((t) =>
+                h(
+                  'tr',
+                  { class: dup.has(res.trades.indexOf(t)) && st.skipDuplicates ? 'closed' : null },
+                  h('td', { text: String(t.row) }),
+                  h('td', { text: Fmt.date(t.date) }),
+                  h('td', { class: 'left' }, h('span', { class: 'ticker', text: t.ticker })),
+                  h('td', { class: 'left', text: t.side === 'buy' ? 'Покупка' : 'Продажа' }),
+                  h('td', { text: Fmt.qty(t.qty) }),
+                  h('td', { text: Fmt.price(t.price) }),
+                  h('td', { text: Fmt.money(t.fee) })
+                )
+              )
+            )
+          )
+        )
+      );
+      if (res.trades.length > shown.length) section.append(h('p', { class: 'map-hint', text: 'Показаны первые ' + shown.length + ' из ' + res.trades.length + '.' }));
+    }
+    nodes.push(section);
+
+    // Параметры.
+    const opts = h('div', { class: 'map-options' });
+    if (data.trades.length) {
+      const radio = (value, text) => {
+        const input = h('input', { type: 'radio', name: 'map-mode', value, checked: st.mode === value });
+        input.addEventListener('change', () => {
+          st.mode = value;
+          renderImport();
+        });
+        return h('label', { class: 'check' }, input, text);
+      };
+      opts.append(radio('append', 'Добавить к сделкам в трекере (сейчас ' + data.trades.length + ')'), radio('replace', 'Заменить все сделки в трекере'));
+      if (st.mode === 'append' && dup.size) {
+        const cb = h('input', { type: 'checkbox', checked: st.skipDuplicates });
+        cb.addEventListener('change', () => {
+          st.skipDuplicates = cb.checked;
+          renderImport();
+        });
+        opts.append(h('label', { class: 'check' }, cb, 'Не добавлять сделки, которые уже есть (совпадают дата, бумага, операция, количество и цена)'));
+      }
+    }
+    if (!fatal && res.errors.length) {
+      const cb = h('input', { type: 'checkbox', checked: st.skipErrors });
+      cb.addEventListener('change', () => {
+        st.skipErrors = cb.checked;
+        renderImport();
+      });
+      opts.append(h('label', { class: 'check' }, cb, 'Импортировать без строк с ошибками'));
+    }
+    if (opts.childNodes.length) nodes.push(h('div', { class: 'map-section' }, opts));
+
+    $('map-body').replaceChildren(...nodes);
+    const btn = $('map-submit');
+    btn.disabled = fatal || importable <= 0 || (res.errors.length > 0 && !st.skipErrors);
+    btn.textContent = importable > 0 ? 'Импортировать ' + importable + ' ' + plural(importable, 'сделку', 'сделки', 'сделок') : 'Импортировать';
+  }
+
+  function submitImport(e) {
+    e.preventDefault();
+    const st = ui.importState;
+    if (!st || !st.result || $('map-submit').disabled) return;
+    const trades = st.result.trades
+      .filter((t, i) => !(st.skipDuplicates && st.dup.has(i)))
+      .map(({ row, ...t }) => t);
+    if (applyImport(trades, st.mode)) {
+      rememberImportMap(st.sig, st.mapping, st.sideMap);
+      $('map-dialog').close();
+      ui.importState = null;
+    }
   }
 
   function applyImport(trades, mode) {
@@ -1139,8 +1710,12 @@
     const next = mode === 'replace' ? incoming : data.trades.concat(incoming);
     const over = Portfolio.findOversell(next);
     if (over) {
-      importDialog('Файл не импортирован', [oversellText(over, 'После импорта ')], [{ label: 'Закрыть', primary: true }]);
-      return;
+      importDialog(
+        'Импорт не выполнен',
+        [oversellText(over, 'После импорта '), ' Возможно, в отчёте нет более ранних покупок — добавьте их или выберите «Добавить к сделкам в трекере».'],
+        [{ label: 'Закрыть', primary: true }]
+      );
+      return false;
     }
     data.trades = next;
     data.nextSeq = seq;
@@ -1149,6 +1724,7 @@
     renderAll();
     setStatus('ok', 'Импортировано сделок: ' + incoming.length);
     refreshPrices();
+    return true;
   }
 
   /* ---------- Тема ---------- */
@@ -1194,6 +1770,8 @@
     try {
       const r = localStorage.getItem(RANGE_KEY);
       if (r && ['1', '3', '6', '12', 'all'].includes(r)) ui.range = r;
+      const tab = localStorage.getItem(INCOME_TAB_KEY);
+      if (tab === 'upcoming' || tab === 'received') ui.incomeTab = tab;
     } catch (e) {
       /* по умолчанию «Всё» */
     }
@@ -1228,7 +1806,8 @@
       ui.filter = e.target.value;
       renderTrades();
     });
-    $('range').addEventListener('click', (e) => {
+    // Период общий для графика стоимости и сравнения с индексом.
+    const onRange = (e) => {
       const b = e.target.closest('button[data-range]');
       if (!b) return;
       ui.range = b.dataset.range;
@@ -1237,7 +1816,42 @@
       } catch (err) {
         /* не критично */
       }
-      renderHistory(compute());
+      const vm = compute();
+      renderHistory(vm);
+      renderBench(vm);
+    };
+    $('range').addEventListener('click', onRange);
+    $('bench-range').addEventListener('click', onRange);
+    $('bench-income').addEventListener('change', (e) => {
+      data.settings.benchIncome = e.target.checked;
+      saveData();
+      renderBench(compute());
+    });
+    $('income-tabs').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-tab]');
+      if (!b) return;
+      ui.incomeTab = b.dataset.tab;
+      try {
+        localStorage.setItem(INCOME_TAB_KEY, ui.incomeTab);
+      } catch (err) {
+        /* не критично */
+      }
+      renderIncome(compute());
+    });
+    $('tax-rate').addEventListener('change', (e) => {
+      const v = Number(e.target.value);
+      if (!Income.TAX_RATES.includes(v)) return;
+      data.settings.taxRate = v;
+      saveData();
+      renderAll();
+    });
+    $('add-income-btn').addEventListener('click', openIncomeDialog);
+    incomeForm.addEventListener('submit', saveManualIncome);
+    $('inc-cancel').addEventListener('click', () => $('income-dialog').close());
+    $('map-form').addEventListener('submit', submitImport);
+    $('map-cancel').addEventListener('click', () => {
+      $('map-dialog').close();
+      ui.importState = null;
     });
     $('export-menu').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-export]');
@@ -1256,7 +1870,7 @@
     $('pd-cancel').addEventListener('click', () => $('price-dialog').close());
     $('pd-reset').addEventListener('click', resetPrice);
     $('clear-btn').addEventListener('click', () => {
-      if (!window.confirm('Удалить все сделки и ручные цены из этого браузера? Перед этим можно сделать экспорт в CSV.')) return;
+      if (!window.confirm('Удалить все сделки, ручные цены и ручные выплаты из этого браузера? Перед этим можно сделать экспорт в CSV.')) return;
       data = emptyData();
       cache = emptyCache();
       ui.live.clear();

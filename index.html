@@ -31,9 +31,10 @@
           <button type="button" role="menuitem" data-export="trades">Сделки</button>
           <button type="button" role="menuitem" data-export="positions">Позиции</button>
           <button type="button" role="menuitem" data-export="history">История стоимости</button>
+          <button type="button" role="menuitem" data-export="income">Дивиденды и купоны</button>
         </div>
       </details>
-      <button type="button" class="btn" id="import-btn">Импорт CSV</button>
+      <button type="button" class="btn" id="import-btn" title="Сделки из CSV-отчёта брокера или из экспорта этого сайта">Импорт сделок</button>
       <input type="file" id="import-file" accept=".csv,text/csv,text/plain" hidden>
       <button type="button" class="btn icon" id="theme-btn" aria-label="Тема оформления" title="Тема оформления"></button>
     </div>
@@ -81,12 +82,62 @@
       </article>
     </section>
 
+    <section class="card" id="bench-card">
+      <div class="card-head">
+        <div>
+          <h2>Доходность и индекс МосБиржи</h2>
+          <p class="card-sub" id="bench-sub"></p>
+        </div>
+        <div class="seg" role="group" aria-label="Период" id="bench-range">
+          <button type="button" data-range="1">1М</button>
+          <button type="button" data-range="3">3М</button>
+          <button type="button" data-range="6">6М</button>
+          <button type="button" data-range="12">1Г</button>
+          <button type="button" data-range="all">Всё</button>
+        </div>
+      </div>
+      <div class="bench-tools" id="bench-tools">
+        <ul class="legend inline">
+          <li><span class="key line s-value"></span>Портфель</li>
+          <li><span class="key line s-bench"></span>Индекс IMOEX</li>
+        </ul>
+        <label class="check"><input type="checkbox" id="bench-income"> Учитывать дивиденды и купоны</label>
+      </div>
+      <div class="chart-box" id="bench-chart"></div>
+      <p class="note" id="bench-note"></p>
+    </section>
+
     <section class="card">
       <div class="card-head">
         <h2>Позиции</h2>
         <label class="check"><input type="checkbox" id="show-closed"> Показать закрытые</label>
       </div>
       <div class="table-wrap"><table class="data positions" id="positions"></table></div>
+    </section>
+
+    <section class="card" id="income-card">
+      <div class="card-head">
+        <div>
+          <h2>Дивиденды и купоны</h2>
+          <p class="card-sub" id="income-sub"></p>
+        </div>
+        <div class="card-tools">
+          <label class="select-label">Налог
+            <select id="tax-rate">
+              <option value="0.13">13 %</option>
+              <option value="0.15">15 %</option>
+              <option value="0">не учитывать</option>
+            </select>
+          </label>
+          <button type="button" class="btn small" id="add-income-btn">+ Выплата вручную</button>
+        </div>
+      </div>
+      <div class="seg" role="group" aria-label="Что показать" id="income-tabs">
+        <button type="button" data-tab="upcoming">Календарь выплат</button>
+        <button type="button" data-tab="received">Получено</button>
+      </div>
+      <div class="table-wrap income-wrap"><table class="data income" id="income-table"></table></div>
+      <p class="note" id="income-note"></p>
     </section>
 
     <section class="card" id="trade-card">
@@ -157,7 +208,9 @@
           <li><b>Итого</b> — текущая стоимость + выручка от продаж − все затраты на покупки (с комиссиями); процент — к сумме всех покупок.</li>
           <li><b>Чистые вложения</b> на графике — сколько денег вложено на дату: покупки с комиссиями минус выручка от продаж. Разрыв между линиями — прибыль или убыток на эту дату.</li>
           <li><b>Цены.</b> Текущие котировки и дневные цены закрытия — MOEX ISS (фондовый рынок, акции и фонды), с задержкой до 15 минут. Если котировки нет, используется цена, введённая вручную, затем последняя сохранённая котировка, затем цена последней сделки — источник подписан у каждой цены.</li>
-          <li>Дивиденды, купоны и налоги не учитываются.</li>
+          <li><b>Дивиденды и купоны</b> — из MOEX ISS. Выплата начисляется на бумаги, которые были в портфеле на дату закрытия реестра с учётом расчётов Т+1: сделка должна быть заключена не позже рабочего дня перед этой датой (до 31.07.2023 — Т+2 для акций и Т+0 для облигаций). Праздничные дни биржи не учитываются. Дата выплаты дивиденда биржей не публикуется — она оценена как 10 рабочих дней после даты реестра. Налог — выбранная ставка от суммы. Если брокер зачислил другую сумму, отметьте выплату «Не учитывать» и добавьте фактическую вручную.</li>
+          <li><b>Итог с выплатами</b> — прибыль/убыток всего плюс полученные дивиденды и купоны после налога. Налог с прибыли от продаж не учитывается. Накопленный купонный доход (НКД), уплаченный при покупке облигации, отдельно не учитывается.</li>
+          <li><b>Доходность портфеля</b> на графике сравнения — взвешенная по времени: покупки и продажи не считаются доходом или убытком, учитывается только изменение цен (и выплаты, если включить). Покупки считаются сделанными в начале дня. <b>IMOEX</b> — ценовой индекс Московской биржи, без дивидендов. Обе линии начинаются с 0 % в начале выбранного периода.</li>
         </ul>
       </details>
     </section>
@@ -186,6 +239,59 @@
     </form>
   </dialog>
 
+  <dialog id="income-dialog" aria-labelledby="inc-title">
+    <form method="dialog" id="income-form" novalidate autocomplete="off">
+      <h3 id="inc-title">Выплата вручную</h3>
+      <p class="dialog-info">Сумма, которую брокер фактически зачислил на счёт (после налога). Например, для бумаг, которых нет на MOEX.</p>
+      <div class="form-grid dialog-grid">
+        <label class="field">
+          <span>Тикер</span>
+          <input name="ticker" list="ticker-list" placeholder="SBER" maxlength="20" autocapitalize="characters" spellcheck="false">
+          <small class="field-error" data-for="ticker"></small>
+        </label>
+        <label class="field">
+          <span>Дата зачисления</span>
+          <input name="date" type="date">
+          <small class="field-error" data-for="date"></small>
+        </label>
+        <fieldset class="field side">
+          <legend>Вид</legend>
+          <div class="seg wide">
+            <label><input type="radio" name="kind" value="dividend" checked><span>Дивиденд</span></label>
+            <label><input type="radio" name="kind" value="coupon"><span>Купон</span></label>
+          </div>
+          <small class="field-error" data-for="kind"></small>
+        </fieldset>
+        <label class="field">
+          <span>Сумма, ₽</span>
+          <input name="amount" inputmode="decimal" placeholder="1 234,56">
+          <small class="field-error" data-for="amount"></small>
+        </label>
+        <label class="field wide-field">
+          <span>Комментарий (необязательно)</span>
+          <input name="note" maxlength="100">
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="inc-cancel">Отмена</button>
+        <button type="submit" class="btn primary">Добавить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="map-dialog" class="wide" aria-labelledby="map-title">
+    <form method="dialog" id="map-form" novalidate>
+      <h3 id="map-title">Импорт сделок</h3>
+      <div id="map-body"></div>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="map-cancel">Отмена</button>
+        <button type="submit" class="btn primary" id="map-submit">Импортировать</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="import-dialog" aria-labelledby="imp-title">
     <form method="dialog">
       <h3 id="imp-title">Импорт сделок</h3>
@@ -197,6 +303,7 @@
   <script src="js/format.js"></script>
   <script src="js/portfolio.js"></script>
   <script src="js/csv.js"></script>
+  <script src="js/income.js"></script>
   <script src="js/moex.js"></script>
   <script src="js/charts.js"></script>
   <script src="js/app.js"></script>

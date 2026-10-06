@@ -219,6 +219,8 @@
    *   points: [{ date, ...значения }],
    *   series: [{ key, label, cls, step }],
    *   tipExtra(point) → [{ value, label, tone }],
+   *   axisFormat(value, step) — подписи оси Y (по умолчанию «1,2 млн ₽»),
+   *   valueFormat(value), valueTone(value) — значения в подсказке (по умолчанию рубли),
    *   ariaLabel,
    * }
    */
@@ -246,10 +248,15 @@
     lo -= pad;
     hi += pad;
     if (lo < 0 && Math.min(...values) >= 0) lo = 0;
+    if (opts.includeZero) {
+      lo = Math.min(lo, 0);
+      hi = Math.max(hi, 0);
+    }
     const ticks = yTicks(lo, hi, plotH < 220 ? 4 : 5);
     const yMin = ticks[0];
     const yMax = ticks[ticks.length - 1];
-    const labels = ticks.map((v) => Fmt.compactMoney(v));
+    const tickStep = ticks.length > 1 ? ticks[1] - ticks[0] : 0;
+    const labels = ticks.map((v) => (opts.axisFormat ? opts.axisFormat(v, tickStep) : Fmt.compactMoney(v)));
     const left = Math.ceil(Math.max(...labels.map(textWidth))) + 14;
     const right = 14;
     const top = 8;
@@ -330,7 +337,8 @@
         dots[k].setAttribute('cy', y(p[s.key]));
       });
       hover.setAttribute('visibility', 'visible');
-      const rows = opts.series.map((s) => ({ value: Fmt.money(p[s.key], { digits: 0 }), label: s.label, swatch: 'line', cls: s.cls }));
+      const fmt = opts.valueFormat || ((v) => Fmt.money(v, { digits: 0 }));
+      const rows = opts.series.map((s) => ({ value: fmt(p[s.key]), label: s.label, swatch: 'line', cls: s.cls, tone: opts.valueTone ? opts.valueTone(p[s.key]) : '' }));
       fillTip(tip, Fmt.date(p.date), rows.concat(opts.tipExtra ? opts.tipExtra(p) : []));
       const yTop = Math.min(...opts.series.map((s) => y(p[s.key])));
       placeTip(container, tip, xx, Math.max(top + 30, yTop));

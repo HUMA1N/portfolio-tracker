@@ -34,6 +34,7 @@
   --s-other: #b5b4ad;
   --s-value: #2a78d6;
   --s-invested: #898781;
+  --s-bench: #eb6834;
 
   --radius: 12px;
   --radius-sm: 8px;
@@ -75,6 +76,7 @@
     --s-other: #5f5e59;
     --s-value: #3987e5;
     --s-invested: #898781;
+    --s-bench: #d95926;
   }
 }
 :root[data-theme="dark"] {
@@ -110,6 +112,7 @@
   --s-other: #5f5e59;
   --s-value: #3987e5;
   --s-invested: #898781;
+  --s-bench: #d95926;
 }
 
 /* ---------- Основа ---------- */
@@ -654,6 +657,10 @@ main {
 .chart-tip-key.line.s-invested {
   background: var(--s-invested);
 }
+.key.line.s-bench,
+.chart-tip-key.line.s-bench {
+  background: var(--s-bench);
+}
 
 .linechart {
   display: block;
@@ -693,6 +700,7 @@ main {
 }
 .series-line.s-value { stroke: var(--s-value); }
 .series-line.s-invested { stroke: var(--s-invested); }
+.series-line.s-bench { stroke: var(--s-bench); }
 .end-dot,
 .hover-dot {
   stroke: var(--surface);
@@ -700,6 +708,7 @@ main {
 }
 .end-dot.s-value, .hover-dot.s-value { fill: var(--s-value); }
 .end-dot.s-invested, .hover-dot.s-invested { fill: var(--s-invested); }
+.end-dot.s-bench, .hover-dot.s-bench { fill: var(--s-bench); }
 .crosshair {
   stroke: var(--axis);
   stroke-width: 1px;
@@ -1082,6 +1091,162 @@ dialog h3 {
 }
 .dialog-actions .spacer {
   flex: 1;
+}
+
+/* ---------- Сравнение с индексом ---------- */
+.bench-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin-bottom: 8px;
+}
+.bench-tools .legend.inline {
+  width: auto;
+  margin: 0;
+}
+.bench-tools .check {
+  font-size: 13px;
+}
+
+/* ---------- Дивиденды и купоны ---------- */
+.card-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+#income-tabs {
+  margin-bottom: 10px;
+}
+table.income tr.month td {
+  padding-top: 16px;
+  border-bottom: 1px solid var(--baseline);
+  color: var(--ink);
+  font-weight: 600;
+  text-align: left;
+}
+table.income tr.month .month-sum {
+  float: right;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+table.income tr.excluded td {
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+table.income tr.excluded td.actions {
+  text-decoration: none;
+}
+table.income .est {
+  color: var(--ink-3);
+}
+.kind-pill {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.kind-pill.manual {
+  border-color: var(--accent-ink);
+  color: var(--accent-ink);
+}
+
+/* ---------- Диалог импорта ---------- */
+dialog.wide {
+  width: min(900px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+}
+.dialog-grid {
+  margin-bottom: 4px;
+}
+.wide-field {
+  grid-column: 1 / -1;
+}
+.map-section {
+  margin-top: 16px;
+}
+.map-section h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.map-hint {
+  margin: 0 0 8px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.map-grid {
+  display: grid;
+  gap: 8px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.map-row {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.map-row select,
+.map-section select {
+  width: 100%;
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 14px;
+}
+.map-row.req > span::after {
+  content: " *";
+  color: var(--neg);
+}
+.map-row.unset select {
+  border-color: var(--warn-border);
+}
+.side-map {
+  display: grid;
+  gap: 6px 12px;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  align-items: center;
+  max-width: 520px;
+  font-size: 14px;
+}
+.side-map .val {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+.map-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 14px;
+}
+.map-summary b {
+  font-variant-numeric: tabular-nums;
+}
+.map-errors {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  max-height: 160px;
+  overflow: auto;
+  color: var(--neg);
+  font-size: 13px;
+}
+.map-options {
+  display: grid;
+  gap: 6px;
+}
+.map-preview table.data {
+  font-size: 13px;
 }
 
 /* ---------- Узкие экраны ---------- */
